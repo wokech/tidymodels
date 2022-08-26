@@ -884,6 +884,685 @@ bake(nhl_angle_fit, nhl_train %>% slice(1:3), starts_with("coord"), angle, shoot
 
 # (6) Tuning hyperparameters ######################################################
 
+## Some model or preprocessing parameters cannot be estimated directly from the data.
+
+## Some examples:
+  
+# Tree depth in decision trees
+# Number of neighbors in a K-nearest neighbor model
+
+## Tuning parameters
+
+# Activation function
+# Number of PCA components 
+# Covariance/correlation matrix structure
+
+## Optimize tuning parameters
+
+# Try different values and measure their performance.
+# Find good values for these parameters.
+# Once the value(s) of the parameter(s) are determined, a model can be 
+# finalized by fitting the model to the entire training set.
+
+## The main two strategies for optimization are:
+
+# Grid search 💠 which tests a pre-defined set of candidate values
+# Iterative search 🌀 which suggests/estimates new values of 
+# candidate parameters to evaluate
+
+
+## Choosing tuning parameters
+
+glm_rec <-
+  recipe(on_goal ~ ., data = nhl_train) %>%
+  step_lencode_mixed(shooter, goaltender, outcome = vars(on_goal)) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_mutate(
+    angle = abs( atan2(abs(coord_y), (89 - coord_x) ) * (180 / pi) ),
+    defensive_zone = ifelse(coord_x <= -25.5, 1, 0),
+    behind_goal_line = ifelse(coord_x >= 89, 1, 0)
+  ) %>%
+  step_zv(all_predictors()) %>%
+  step_ns(angle, deg_free = tune("angle")) %>%
+  step_ns(coord_x, deg_free = tune("coord_x")) %>%
+  step_normalize(all_numeric_predictors())
+
+
+glm_spline_wflow <-
+  workflow() %>%
+  add_model(logistic_reg()) %>%
+  add_recipe(glm_rec)
+
+
+## Grid search
+# Parameters
+
+# The tidymodels framework provides pre-defined information on tuning 
+# parameters (such as their type, range, transformations, etc).
+
+# The extract_parameter_set_dials() function extracts these tuning 
+# parameters and the info.
+
+# Grids
+
+# Create your grid manually or automatically.
+
+## Create a grid
+
+# The grid_*() functions can make a grid.
+
+glm_spline_wflow %>% 
+  extract_parameter_set_dials()
+
+# A parameter set can be updated (e.g. to change the ranges).
+
+set.seed(12)
+grid <- 
+  glm_spline_wflow %>% 
+  extract_parameter_set_dials() %>% 
+  grid_latin_hypercube(size = 25)
+
+grid
+
+# A space-filling design like this tends to perform better than random grids.
+# Space-filling designs are also usually more efficient than regular grids.
+
+set.seed(12)
+grid_1 <- 
+  glm_spline_wflow %>% 
+  extract_parameter_set_dials() %>% 
+  grid_regular(levels = 25)
+
+grid_1
+
+
+set.seed(12)
+grid <- 
+  glm_spline_wflow %>% 
+  extract_parameter_set_dials() %>% 
+  update(angle = spline_degree(c(2L, 50L)),
+         coord_x = spline_degree(c(2L, 50L))) %>% 
+  grid_latin_hypercube(size = 25)
+
+grid
+
+
+## The results
+
+grid %>% 
+  ggplot(aes(angle, coord_x)) +
+  geom_point(size = 2)
+
+## Use the tune_*() functions to tune models
+
+## Spline grid search
+
+set.seed(9)
+ctrl <- control_grid(save_pred = TRUE, parallel_over = "everything")
+
+glm_spline_res <-
+  glm_spline_wflow %>%
+  tune_grid(resamples = nhl_val, grid = grid, control = ctrl)
+
+glm_spline_res
+
+
+## Grid results
+
+autoplot(glm_spline_res)
+
+
+## Tuning results
+
+collect_metrics(glm_spline_res)
+
+collect_metrics(glm_spline_res, summarize = FALSE)
+
+## Choose a parameter combination
+
+show_best(glm_spline_res, metric = "roc_auc")
+
+
+## Choose a parameter combination
+
+# Create your own tibble for final parameters or use 
+# one of the tune::select_*() functions:
+  
+select_best(glm_spline_res, metric = "roc_auc")
+
+## This best result has:
+  
+# low-degree spline for angle (less “wiggly”, less complex)
+# higher-degree spline for coord_x (more “wiggly”, more complex)
+
+## Boosted trees
+
+# Ensemble many decision tree models
+
+## Review how a decision tree model works:
+
+# Series of splits or if/then statements based on predictors
+# First the tree grows until some condition is met (maximum depth, no more data)
+# Then the tree is pruned to reduce its complexity
+
+
+## Boosting methods fit a sequence of tree-based models.
+
+# Each tree is dependent on the one before and tries to compensate for any 
+# poor results in the previous trees.
+# This is like gradient-based steepest ascent methods from calculus.
+
+## Boosted tree tuning parameters
+
+# Most modern boosting methods have a lot of tuning parameters!
+  
+# For tree growth and pruning (min_n, max_depth, etc)
+# For boosting (trees, stop_iter, learn_rate)
+
+# We’ll use early stopping to stop boosting when a few iterations 
+# produce consecutively worse results.
+
+## Comparing tree ensembles
+
+## Random forest
+
+# Independent trees
+# Bootstrapped data
+# No pruning
+# 1000’s of trees
+
+## Boosting
+
+# Dependent trees
+# Different case weights
+# Tune tree parameters
+# Far fewer trees
+
+# The general consensus for tree-based models is, in terms of performance: 
+# boosting > random forest > bagging > single trees.
+
+## Boosted tree code
+
+xgb_spec <-
+  boost_tree(
+    trees = tune(), min_n = tune(), tree_depth = tune(),
+    learn_rate = tune(), loss_reduction = tune()
+  ) %>%
+  set_mode("classification") %>% 
+  set_engine("xgboost") 
+
+xgb_rec <- 
+  recipe(on_goal ~ ., data = nhl_train) %>% 
+  step_lencode_mixed(shooter, goaltender, outcome = vars(on_goal)) %>% 
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+xgb_wflow <- 
+  workflow() %>% 
+  add_model(xgb_spec) %>% 
+  add_recipe(xgb_rec)
+
+
+## Running in parallel
+
+
+# Grid search, combined with resampling, requires fitting a lot of models!
+# These models don’t depend on one another and can be run in parallel.
+
+# We can use a parallel backend to do this:
+
+
+cores <- parallelly::availableCores(logical = FALSE)
+cl <- parallel::makePSOCKcluster(cores)
+doParallel::registerDoParallel(cl)
+
+# Now call `tune_grid()`!
+
+# Shut it down with:
+foreach::registerDoSEQ()
+parallel::stopCluster(cl)
+
+
+## Running in parallel
+
+# Speed-ups are fairly linear up to the number of physical cores (10 here).
+
+
+## Tuning
+
+# This will take some time to run
+
+
+set.seed(9)
+
+xgb_res <-
+  xgb_wflow %>%
+  tune_grid(resamples = nhl_val, grid = 30, control = ctrl) # automatic grid now!
+
+
+## Tuning results
+xgb_res
+
+## Tuning results
+autoplot(xgb_res)
+
+
+## Again with the location features
+
+coord_rec <- 
+  xgb_rec %>%
+  step_mutate(
+    angle = abs( atan2(abs(coord_y), (89 - coord_x) ) * (180 / pi) ),
+    defensive_zone = ifelse(coord_x <= -25.5, 1, 0),
+    behind_goal_line = ifelse(coord_x >= 89, 1, 0)
+  )
+
+xgb_coord_wflow <- 
+  workflow() %>% 
+  add_model(xgb_spec) %>% 
+  add_recipe(coord_rec)
+
+set.seed(9)
+xgb_coord_res <-
+  xgb_coord_wflow %>%
+  tune_grid(resamples = nhl_val, grid = 30, control = ctrl)
+
+
+## Did the machine figure it out?
+# No extra features:
+
+show_best(xgb_res, metric = "roc_auc", n = 3)
+
+# With additional coordinate features:
+  
+show_best(xgb_coord_res, metric = "roc_auc", n = 3)
+
+## Compare models
+# Best logistic regression results:
+  
+glm_spline_res %>% 
+  show_best(metric = "roc_auc", n = 1) %>% 
+  select(.metric, .estimator, mean, n, std_err, .config)
+
+# Best boosting results:
+
+xgb_res %>% 
+  show_best(metric = "roc_auc", n = 1) %>% 
+  select(.metric, .estimator, mean, n, std_err, .config)
+
+
+## Updating the workflow
+best_auc <- select_best(glm_spline_res, metric = "roc_auc")
+best_auc
+
+
+glm_spline_wflow <-
+  glm_spline_wflow %>% 
+  finalize_workflow(best_auc)
+
+glm_spline_wflow
+
+
+## The final fit to the NHL data
+test_res <- 
+  glm_spline_wflow %>% 
+  last_fit(split = nhl_split)
+
+test_res
+
+
+# Remember that last_fit() fits one time with the combined training and 
+# validation set, then evaluates one time with the testing set.
+
+
+## Estimates of ROC AUC
+# Validation results from tuning:
+
+glm_spline_res %>% 
+  show_best(metric = "roc_auc", n = 1) %>% 
+  select(.metric, mean, n, std_err)
+
+# Test set results:
+
+test_res %>% collect_metrics()
+
+## Final fitted workflow
+
+# Extract the final fitted workflow, fit using the training set:
+  
+final_glm_spline_wflow <- 
+  test_res %>% 
+  extract_workflow()
+
+predict(final_glm_spline_wflow, nhl_test[1:3,])
+
+
+## Explain yourself
+# There are two categories of model explanations, global and local.
+
+# Global model explanations provide an overall understanding aggregated 
+# over a whole set of observations.
+# Local model explanations provide information about a prediction for 
+# a single observation.
+
+# You can also build global model explanations by aggregating local model explanations.
+
+
+## tidymodels integrates with model explainability frameworks
+
+
+## A tidymodels explainer
+# We can build explainers using:
+  
+# original, basic predictors
+# derived features
+
+library(DALEXtra)
+
+glm_explainer <- explain_tidymodels(
+  final_glm_spline_wflow,
+  data = dplyr::select(nhl_train, -on_goal),
+  # DALEX required an integer for factors:
+  y = as.integer(nhl_train$on_goal) - 1,
+  verbose = FALSE
+)
+
+
+## Explain the x coordinates
+# With our explainer, let’s create partial dependence profiles:
+  
+set.seed(123)
+pdp_coord_x <- model_profile(
+  glm_explainer,
+  variables = "coord_x",
+  N = 500,
+  groups = "strength"
+)
+
+# You can use the default plot() method or create your own visualization.
+
+
+# (7) Case Study on Transportation ###############################################
+
+## Chicago L-Train data
+
+# Several years worth of pre-pandemic data were assembled to try to predict the daily 
+# number of people entering the Clark and Lake elevated (“L”) train station in Chicago.
+
+## Predictors
+# the 14-day lagged ridership at this and other stations (units: thousands of rides/day)
+# weather data
+# home/away game schedules for Chicago teams
+# the date
+
+# The data are in modeldata.
+
+
+## Your turn: Explore the Data
+
+# Take a look at these data for a few minutes and see if you can find any 
+# interesting characteristics in the predictors or the outcome.
+
+library(tidymodels)
+library(rules)
+data("Chicago")
+dim(Chicago)
+
+
+stations
+
+## Splitting with Chicago data
+
+# Let’s put the last two weeks of data into the test set. 
+# initial_time_split() can be used for this purpose:
+
+
+data(Chicago)
+
+chi_split <- initial_time_split(Chicago, prop = 1 - (14/nrow(Chicago)))
+chi_split
+
+chi_train <- training(chi_split)
+chi_test  <- testing(chi_split)
+
+nrow(chi_train)
+nrow(chi_test)
+
+
+## Time series resampling
+
+# Our Chicago data is over time. Regular cross-validation, which uses random 
+# sampling, may not be the best idea.
+
+# We can emulate our training/test split by making similar resamples.
+
+# Fold 1: Take the first X years of data as the analysis set, the next 2 
+# weeks as the assessment set.
+
+# Fold 2: Take the first X years + 2 weeks of data as the analysis set, the 
+# next 2 weeks as the assessment set.
+
+# and so on
+
+
+## Times series resampling
+
+chi_rs <-
+  chi_train %>%
+  sliding_period(
+    index = "date",  # Use the date column to find the date data
+    period = "week", # Our units will be weeks
+    lookback = 52 * 15, # Every analysis set has 15 years of data
+    assess_stop = 2, # Every assessment set has 2 weeks of data
+    step = 2 # Increment by 2 weeks so that there are no overlapping assessment sets.
+  )
+
+
+chi_rs$splits[[1]] %>% assessment() %>% pluck("date") %>% range()
+
+chi_rs$splits[[2]] %>% assessment() %>% pluck("date") %>% range()
+
+chi_rs
+
+
+## Our resampling object
+
+# We will fit 16 models on 16 slightly different analysis sets.
+
+# Each will produce a separate performance metrics.
+
+# We will average the 16 metrics to get the resampling estimate of that statistic.
+
+
+## Feature engineering with recipes
+
+chi_rec <- 
+  recipe(ridership ~ ., data = chi_train)
+
+# Based on the formula, the function assigns columns to roles of “outcome” or “predictor”
+
+summary(chi_rec)
+
+
+chi_rec <- 
+  recipe(ridership ~ ., data = chi_train) %>% 
+  step_date(date, features = c("dow", "month", "year")) %>% 
+  # This creates three new columns in the data based on the date. 
+  # Note that the day-of-the-week column is a factor.
+  step_holiday(date) %>% 
+  # Add indicators for major holidays. Specific holidays, especially those non-USA, 
+  # can also be generated.
+  # At this point, we don’t need date anymore. Instead of deleting it (there is a 
+  # step for that) we will change its role to be an identification variable.
+  update_role(date, new_role = "id") %>%
+  # date is still in the data set but tidymodels knows not to treat it as an analysis column.
+  update_role_requirements(role = "id", bake = TRUE) %>% 
+  # update_role_requirements() is needed to make sure that this column is required 
+  # when making new data points.
+  step_zv(all_nominal_predictors())
+  # remove constant columns
+
+## Handle correlations
+
+# The station columns have a very high degree of correlation.
+# We might want to decorrelate them with principle component 
+# analysis to help the model fits go more easily.
+# The vector stations contains all station names and can be used to 
+# identify all the relevant columns.
+
+chi_pca_rec <- 
+  chi_rec %>% 
+  step_normalize(all_of(!!stations)) %>% 
+  step_pca(all_of(!!stations), num_comp = tune())
+
+# We’ll tune the number of PCA components for (default) values of one to four.
+
+## Make some models
+
+# Let’s try three models. The first one requires the rules package (loaded earlier).
+
+cb_spec <- cubist_rules(committees = 25, neighbors = tune())
+mars_spec <- mars(prod_degree = tune()) %>% set_mode("regression")
+lm_spec <- linear_reg()
+
+chi_set <- 
+  workflow_set(
+    list(pca = chi_pca_rec, basic = chi_rec), 
+    list(cubist = cb_spec, mars = mars_spec, lm = lm_spec)
+  ) %>% 
+  # Evaluate models using mean absolute errors
+  option_add(metrics = metric_set(mae))
+
+## Process them on the resamples
+
+# Set up some objects for stacking ensembles (in a few slides)
+grid_ctrl <- control_grid(save_pred = TRUE, save_workflow = TRUE)
+
+chi_res <- 
+  chi_set %>% 
+  workflow_map(
+    resamples = chi_rs,
+    grid = 10,
+    control = grid_ctrl,
+    verbose = TRUE,
+    seed = 12
+  )
+
+
+## How do the results look?
+
+rank_results(chi_res)
+
+## Plot the results
+
+autoplot(chi_res)
+
+## Pull out specific results
+
+# We can also pull out the specific tuning results and look at them:
+  
+chi_res %>% 
+  extract_workflow_set_result("pca_cubist") %>% 
+  autoplot()
+
+## Why choose just one final_fit?
+
+# Model stacks generate predictions that are informed by several models. ############
+
+## Building a model stack
+
+library(stacks)
+
+# Define candidate members
+# Initialize a data stack object
+# Add candidate ensemble members to the data stack
+# Evaluate how to combine their predictions
+# Fit candidate ensemble members with non-zero stacking coefficients
+# Predict on new data!
+
+
+## Start the stack and add members
+# Collect all of the resampling results for all model configurations.
+
+chi_stack <- 
+  stacks() %>% 
+  add_candidates(chi_res)
+
+
+## Estimate weights for each candidate
+# Which configurations should be retained? Uses a penalized linear model:
+  
+set.seed(122)
+chi_stack_res <- blend_predictions(chi_stack)
+
+chi_stack_res
+
+## How did it do?
+# The overall results of the penalized model:
+
+autoplot(chi_stack_res)
+
+## What does it use?
+autoplot(chi_stack_res, type = "weights")
+
+## Fit the required candidate models
+# For each model we retain in the stack, we need their model 
+# fit on the entire training set.
+
+chi_stack_res <- fit_members(chi_stack_res)
+
+## The test set: best Cubist model
+# We can pull out the results and the workflow to fit the single best cubist model.
+
+best_cubist <- 
+  chi_res %>% 
+  extract_workflow_set_result("pca_cubist") %>% 
+  select_best()
+
+cubist_res <- 
+  chi_res %>% 
+  extract_workflow("pca_cubist") %>% 
+  finalize_workflow(best_cubist) %>% 
+  last_fit(split = chi_split, metrics = metric_set(mae))
+
+
+## The test set: stack ensemble
+# We don’t have last_fit() for stacks (yet) so we manually make predictions.
+
+stack_pred <- 
+  predict(chi_stack_res, chi_test) %>% 
+  bind_cols(chi_test)
+
+## Compare the results
+# Single best versus the stack:
+
+collect_metrics(cubist_res)
+stack_pred %>% mae(ridership, .pred)
+
+
+## Plot the test set
+cubist_res %>% 
+  collect_predictions() %>% 
+  ggplot(aes(ridership, .pred)) + 
+  geom_point(alpha = 1 / 2) + 
+  geom_abline(lty = 2, col = "green") + 
+  coord_obs_pred()
+
+
+# (8) Wrapping up ###############################################################
+
+## Resources to keep learning
+# https://www.tidymodels.org/
+# https://www.tmwr.org/
+# http://www.feat.engineering/
+# https://smltar.com/
+
+
+
+
+
+
+
 
 
 
