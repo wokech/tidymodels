@@ -1,3 +1,4 @@
 # TidyModels
 
-A repo used to practice tidy modeling with R
+This repository contains materials and code for practicing tidymodels with R.
+
